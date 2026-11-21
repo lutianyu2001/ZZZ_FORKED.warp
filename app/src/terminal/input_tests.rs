@@ -10646,6 +10646,30 @@ fn open_rich_input_for_terminal(terminal: &ViewHandle<TerminalView>, app: &mut A
 }
 
 #[test]
+fn cli_agent_rich_input_takes_images_whatever_the_agent_model() {
+    App::test((), |mut app| async move {
+        let _cli_agent_flag = FeatureFlag::CLIAgentRichInput.override_enabled(true);
+        let _image_flag = FeatureFlag::ImageAsContext.override_enabled(true);
+
+        initialize_app(&mut app);
+
+        let terminal = add_window_with_bootstrapped_terminal(&mut app, None, None).await;
+        let input = terminal.read(&app, |terminal, _| terminal.input().clone());
+        let editor = input.read(&app, |input, _| input.editor().clone());
+
+        open_rich_input_for_terminal(&terminal, &mut app);
+
+        // Images in the rich input are pasted into the CLI agent, so whether the Agent Mode
+        // model supports vision doesn't matter.
+        editor.read(&app, |editor, _| {
+            assert!(editor.image_context_options.is_enabled());
+            assert!(!editor.image_context_options.is_unsupported_model());
+            assert_eq!(editor.image_context_options.num_images_in_conversation(), 0);
+        });
+    });
+}
+
+#[test]
 fn enter_submits_when_submit_on_ctrl_enter_is_false() {
     use std::cell::RefCell;
     use std::rc::Rc;

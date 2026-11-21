@@ -29,6 +29,7 @@ use crate::ai::llms::{LLMPreferences, LLMPreferencesEvent};
 use crate::ai::outline::RepoOutlines;
 use crate::code_review::github_repo_model::GitHubRepoModel;
 use crate::terminal::TerminalModel;
+use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::event::{BlockCompletedEvent, BlockType};
 use crate::terminal::model::block::{BlockId, BlockMetadata};
 use crate::terminal::model::session::Sessions;
@@ -206,9 +207,7 @@ impl BlocklistAIContextModel {
                     ctx,
                     Some(me.terminal_surface_id),
                 );
-                if !vision_supported {
-                    me.clear_pending_images(ctx);
-                }
+                me.handle_active_agent_model_changed(vision_supported, ctx);
             }
         });
 
@@ -587,6 +586,22 @@ impl BlocklistAIContextModel {
     /// Get the pending AI document ID if one is set.
     pub fn pending_document_id(&self) -> Option<AIDocumentId> {
         self.pending_document_id
+    }
+
+    /// Drops the pending images once the active Agent Mode model can't take them. While a CLI
+    /// agent's rich input is open they stay: they are pasted into the CLI agent, not sent to
+    /// that model.
+    fn handle_active_agent_model_changed(
+        &mut self,
+        vision_supported: bool,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if vision_supported
+            || CLIAgentSessionsModel::as_ref(ctx).is_input_open(self.terminal_surface_id)
+        {
+            return;
+        }
+        self.clear_pending_images(ctx);
     }
 
     pub fn clear_pending_images(&mut self, ctx: &mut ModelContext<Self>) {

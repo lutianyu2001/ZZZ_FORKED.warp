@@ -24,13 +24,18 @@ use crate::ai::blocklist::conversation_selection::{
     ConversationSelection, ConversationSelectionEvent,
 };
 use crate::ai::blocklist::{
-    BlocklistAIHistoryEvent, BlocklistAIHistoryModel, QueuedQuery, QueuedQueryModel,
-    QueuedQueryOrigin,
+    BlocklistAIHistoryEvent, BlocklistAIHistoryModel, InputConfig, InputType, QueuedQuery,
+    QueuedQueryModel, QueuedQueryOrigin,
 };
 #[cfg(feature = "local_fs")]
 use crate::code_review::git_repo_model::GitRepoStatusModel;
 #[cfg(feature = "local_fs")]
 use crate::code_review::github_repo_model::GitHubRepoModel;
+use crate::terminal::CLIAgent;
+use crate::terminal::cli_agent_sessions::{
+    CLIAgentInputEntrypoint, CLIAgentInputState, CLIAgentSession, CLIAgentSessionContext,
+    CLIAgentSessionStatus, CLIAgentSessionsModel,
+};
 use crate::terminal::color::{self, Colors};
 use crate::terminal::event_listener::ChannelEventListener;
 use crate::terminal::model::test_utils::block_size;
@@ -617,6 +622,86 @@ fn enqueue_moves_staged_attachments_onto_the_row_and_clears_input() {
             assert_eq!(attachments.len(), 2);
             assert_eq!(attachments[0].file_name(), "a.png");
             assert_eq!(attachments[1].file_name(), "notes.txt");
+        });
+    });
+}
+
+/// Opens a CLI agent's rich input on the terminal the context model belongs to.
+fn open_cli_agent_rich_input(app: &mut App, model: &ModelHandle<BlocklistAIContextModel>) {
+    let terminal_surface_id = model.read(&*app, |m, _| m.terminal_surface_id);
+    CLIAgentSessionsModel::handle(&*app).update(app, |sessions, ctx| {
+        sessions.set_session(
+            terminal_surface_id,
+            CLIAgentSession {
+                agent: CLIAgent::Claude,
+                status: CLIAgentSessionStatus::InProgress,
+                session_context: CLIAgentSessionContext::default(),
+                input_state: CLIAgentInputState::Closed,
+                should_auto_toggle_input: false,
+                listener: None,
+                remote_host: None,
+                plugin_version: None,
+                draft_text: None,
+                custom_command_prefix: None,
+                received_rich_notification: false,
+            },
+            ctx,
+        );
+        sessions.open_input(
+            terminal_surface_id,
+            CLIAgentInputEntrypoint::CtrlG,
+            InputConfig {
+                input_type: InputType::AI,
+                is_locked: true,
+            },
+            false,
+            false,
+            ctx,
+        );
+    });
+}
+
+#[test]
+fn agent_model_without_vision_keeps_images_of_open_cli_agent_rich_input() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+        let model = build_test_context_model(&mut app);
+        open_cli_agent_rich_input(&mut app, &model);
+
+        model.update(&mut app, |m, ctx| {
+            m.append_pending_attachments_for_test(vec![
+                make_image_attachment("a.png"),
+                make_file_attachment("notes.txt"),
+            ]);
+            // The images are pasted into the CLI agent, so a switch to a model without vision
+            // (also in another pane) leaves them alone.
+            m.handle_active_agent_model_changed(false, ctx);
+        });
+
+        model.read(&app, |m, _| {
+            assert_eq!(m.pending_images().len(), 1);
+            assert_eq!(m.pending_files().len(), 1);
+        });
+    });
+}
+
+#[test]
+fn agent_model_without_vision_drops_images_but_keeps_files() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+        let model = build_test_context_model(&mut app);
+
+        model.update(&mut app, |m, ctx| {
+            m.append_pending_attachments_for_test(vec![
+                make_image_attachment("a.png"),
+                make_file_attachment("notes.txt"),
+            ]);
+            m.handle_active_agent_model_changed(false, ctx);
+        });
+
+        model.read(&app, |m, _| {
+            assert!(m.pending_images().is_empty());
+            assert_eq!(m.pending_files().len(), 1);
         });
     });
 }
