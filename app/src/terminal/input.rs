@@ -9524,6 +9524,11 @@ impl Input {
             });
             return;
         }
+        // Focusing the input hands focus on to the editor, so an editor that has it already keeps
+        // it. Moving it off and back would commit an IME composition in progress as typed text.
+        if self.editor.is_focused(ctx) {
+            return;
+        }
         ctx.focus_self();
     }
 
