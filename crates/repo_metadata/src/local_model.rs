@@ -1518,10 +1518,11 @@ impl LocalRepoMetadataModel {
 
         // Removals for deleted and moved-from paths
         for path_to_remove in update.deleted.iter().chain(update.moved.values()) {
-            mutations.push(FileTreeMutation::Remove(path_to_remove.clone()));
-            if let Ok(path) = StandardizedPath::try_from_local(path_to_remove) {
+            let tree_path = resolve_parent_symlinks(path_to_remove);
+            if let Ok(path) = StandardizedPath::try_from_local(&tree_path) {
                 removed_roots.push(path);
             }
+            mutations.push(FileTreeMutation::Remove(tree_path));
             // A removed direct provider child may have been a symlinked skill directory,
             // which is intentionally absent from the canonical tree and standing file matches.
             standing_results.record_direct_project_skill_provider_child_change(
@@ -1536,7 +1537,10 @@ impl LocalRepoMetadataModel {
                 continue;
             }
 
-            let is_ignored = Self::path_is_ignored(path_to_add, gitignores);
+            // The watcher can name a path through a symlinked directory, while the tree
+            // holds each entry under its canonical parent.
+            let tree_path = resolve_parent_symlinks(path_to_add);
+            let is_ignored = Self::path_is_ignored(&tree_path, gitignores);
 
             if path_to_add.is_dir() {
                 if lazy_load {
@@ -1545,15 +1549,15 @@ impl LocalRepoMetadataModel {
                     // the subtree on demand when the user expands it (see
                     // `load_directory`).
                     mutations.push(FileTreeMutation::AddUnloadedDirectory {
-                        path: path_to_add.clone(),
+                        path: tree_path.clone(),
                         is_ignored,
                     });
                     continue;
                 }
 
-                if is_ignored && !matches_force_included_path(path_to_add, force_included_paths) {
+                if is_ignored && !matches_force_included_path(&tree_path, force_included_paths) {
                     mutations.push(FileTreeMutation::AddUnloadedDirectory {
-                        path: path_to_add.clone(),
+                        path: tree_path.clone(),
                         is_ignored,
                     });
                     continue;
@@ -1563,7 +1567,7 @@ impl LocalRepoMetadataModel {
                 let mut gitignores = gitignores.to_owned();
                 let mut file_limit = MAX_FILES_PER_REPO;
                 match Entry::build_tree_with_standing_queries(
-                    path_to_add,
+                    &tree_path,
                     &mut files,
                     &mut gitignores,
                     Some(&mut file_limit),
@@ -1582,7 +1586,7 @@ impl LocalRepoMetadataModel {
                 {
                     Ok(subtree) => {
                         mutations.push(FileTreeMutation::AddDirectorySubtree {
-                            dir_path: path_to_add.clone(),
+                            dir_path: tree_path.clone(),
                             subtree,
                         });
                     }
@@ -1602,7 +1606,7 @@ impl LocalRepoMetadataModel {
                     Err(e) => {
                         log::warn!("Failed to build subtree for directory {path_to_add:?}: {e:?}");
                         mutations.push(FileTreeMutation::AddUnloadedDirectory {
-                            path: path_to_add.clone(),
+                            path: tree_path.clone(),
                             is_ignored,
                         });
                     }
@@ -1613,7 +1617,7 @@ impl LocalRepoMetadataModel {
                     .extension()
                     .and_then(|ext| ext.to_str().map(|s| s.to_owned()));
                 mutations.push(FileTreeMutation::AddFile {
-                    path: path_to_add.clone(),
+                    path: tree_path.clone(),
                     is_ignored,
                     extension,
                 });
@@ -2209,6 +2213,22 @@ impl LocalRepoMetadataModel {
         standing_results: StandingQueryResults,
     ) {
         self.standing_results.insert(repo_path, standing_results);
+    }
+}
+
+/// Resolves the symlinks in the directories leading to `path` and keeps its last component as
+/// it is.
+///
+/// The tree holds each entry under its canonical parent: building it never descends into a
+/// symlinked directory, and a symlinked file keeps its own path. A watcher that follows
+/// symlinks reports a change inside a linked directory under the link's path, so a mutation
+/// made from that path would add the entry a second time, apart from its canonical children.
+fn resolve_parent_symlinks(path: &Path) -> PathBuf {
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(file_name)) => dunce::canonicalize(parent)
+            .map(|parent| parent.join(file_name))
+            .unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
     }
 }
 
