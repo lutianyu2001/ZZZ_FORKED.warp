@@ -4330,6 +4330,9 @@ impl Input {
         trigger: QueuedPromptSendNowTrigger,
         ctx: &mut ViewContext<Self>,
     ) {
+        if self.refuse_dispatch_during_rewind(conversation_id, ctx) {
+            return;
+        }
         // Read the origin before dispatch; the row is removed once it fires.
         if QueuedQueryModel::as_ref(ctx).is_dispatch_blocked(conversation_id) {
             return;
@@ -4437,6 +4440,44 @@ impl Input {
         });
         self.show_ephemeral_error_toast(
             "Still checking this session's status — please try sending your message again in a moment.",
+            ctx,
+        );
+        true
+    }
+
+    /// Refuses an AI submission from the input while the selected conversation is being rewound,
+    /// leaving the draft and its attachments in place. Shell commands are not held back.
+    fn refuse_ai_submission_during_rewind(&self, ctx: &mut ViewContext<Self>) -> bool {
+        if !self.ai_input_model.as_ref(ctx).is_ai_input_enabled() {
+            return false;
+        }
+        let Some(conversation_id) = self
+            .ai_context_model
+            .as_ref(ctx)
+            .selected_conversation_id(ctx)
+        else {
+            return false;
+        };
+        self.refuse_dispatch_during_rewind(conversation_id, ctx)
+    }
+
+    /// Whether `conversation_id` is being rewound, in which case nothing may be sent to it: says
+    /// so in a toast. The history is about to be truncated, and what is sent now would go with it.
+    fn refuse_dispatch_during_rewind(
+        &self,
+        conversation_id: AIConversationId,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        if !self
+            .ai_controller
+            .as_ref(ctx)
+            .is_rewind_in_progress(conversation_id)
+        {
+            return false;
+        }
+        self.show_ephemeral_error_toast(
+            "The conversation is being rewound. Your draft and queued prompts are kept; send \
+             again once it is done.",
             ctx,
         );
         true
@@ -14142,7 +14183,8 @@ impl Input {
                 );
             }
             return;
-        } else if self.maybe_launch_cloud_handoff_request(ctx)
+        } else if self.refuse_ai_submission_during_rewind(ctx)
+            || self.maybe_launch_cloud_handoff_request(ctx)
             || self.maybe_queue_input_for_in_progress_conversation(ctx)
             || self.maybe_queue_input_during_cloud_setup(ctx)
             || self.maybe_handle_enter_for_slash_command(ctx)

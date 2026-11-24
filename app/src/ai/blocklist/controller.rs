@@ -384,6 +384,9 @@ pub struct BlocklistAIController {
     pending_local_claude_wakes: HashMap<AIConversationId, SpawnedFutureHandle>,
     /// Passive conversations explicitly requested to follow up after actions complete.
     pending_passive_follow_ups: HashSet<AIConversationId>,
+    /// Conversations being rewound: their file edits are being restored and their history is
+    /// about to be truncated, so no request may be sent for them until that is done.
+    rewinds_in_progress: HashSet<AIConversationId>,
     /// Prevents repeated interrupts and distinguishes an injection-triggered exit 130 from user
     /// cancellation, so the interrupted command's result can continue with the injected follow-up.
     commands_interrupted_for_injection: HashMap<AIConversationId, BlockId>,
@@ -802,6 +805,7 @@ impl BlocklistAIController {
             ambient_agent_task_id: None,
             attachments_download_dir: None,
             pending_auto_resume_handles: HashMap::new(),
+            rewinds_in_progress: HashSet::new(),
             pending_local_claude_wakes: HashMap::new(),
             pending_passive_follow_ups: HashSet::new(),
             commands_interrupted_for_injection: HashMap::new(),
@@ -3375,6 +3379,13 @@ impl BlocklistAIController {
         is_queued_prompt: bool,
         ctx: &mut ModelContext<Self>,
     ) -> anyhow::Result<(AIConversationId, ResponseStreamId)> {
+        // A request sent now would be appended to the history the rewind is about to truncate.
+        anyhow::ensure!(
+            !self.is_rewind_in_progress(request_input.conversation_id),
+            "Conversation {:?} is being rewound",
+            request_input.conversation_id
+        );
+
         let history_model = BlocklistAIHistoryModel::handle(ctx);
         let (
             conversation_id,
@@ -3659,13 +3670,29 @@ impl BlocklistAIController {
             .has_active_stream_for_conversation(conversation_id, app)
     }
 
+    /// Marks `conversation_id` as being rewound, or as done with it. While it is marked, no
+    /// request is sent for the conversation.
+    pub fn set_rewind_in_progress(&mut self, conversation_id: AIConversationId, in_progress: bool) {
+        if in_progress {
+            self.rewinds_in_progress.insert(conversation_id);
+        } else {
+            self.rewinds_in_progress.remove(&conversation_id);
+        }
+    }
+
+    /// Whether `conversation_id` is being rewound.
+    pub fn is_rewind_in_progress(&self, conversation_id: AIConversationId) -> bool {
+        self.rewinds_in_progress.contains(&conversation_id)
+    }
+
     /// Whether a fresh automatic prompt can start without interrupting ongoing work.
     pub(crate) fn can_dispatch_queued_warp_agent_prompt(
         &self,
         conversation_id: AIConversationId,
         ctx: &AppContext,
     ) -> bool {
-        !QueuedQueryModel::as_ref(ctx).is_dispatch_blocked(conversation_id)
+        !self.is_rewind_in_progress(conversation_id)
+            && !QueuedQueryModel::as_ref(ctx).is_dispatch_blocked(conversation_id)
             && !self.has_active_stream_for_conversation(conversation_id, ctx)
             && !OrchestrationEventService::as_ref(ctx).is_conversation_exiting(conversation_id)
             && BlocklistAIHistoryModel::as_ref(ctx)
